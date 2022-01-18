@@ -4,6 +4,7 @@ import FluentMySQLDriver
 import SQLKit
 import XCTest
 import Logging
+import Algorithms
 
 final class FluentMySQLDriverTests: XCTestCase {
 //    func testAll() throws { try self.benchmarker.testAll() }
@@ -344,6 +345,52 @@ final class FluentMySQLDriverTests: XCTestCase {
 
         let fetched = try Foo.find(foo.id, on: self.db).wait()
         XCTAssertEqual(fetched?.bar, foo.bar)
+    }
+
+    func testQueryInstrumentationUsage() throws {
+        final class Foo: Model {
+            static let schema = "foo"
+            @ID(custom: .id) var id: Int?
+            @Field(key: "name") var name: String
+            @Field(key: "jsonIt") var jsonIt: [String: [Double]]
+            
+            init() {}
+            
+            init(id: Int?, name: String, jsonIt: [String: [Double]]) {
+                self.id = id
+                self.name = name
+                self.jsonIt = jsonIt
+            }
+        }
+
+        let db = self.dbs.database(.a, logger: Logger(label: "test.fluent.a"), on: self.eventLoopGroup.next(), instrumentation: .init())!
+
+        try (db as! SQLDatabase).drop(table: Foo.schema).ifExists().run().wait()
+        try db.schema(Foo.schema)
+            .field(.id, .int, .identifier(auto: false), .required)
+            .field("name", .string, .required)
+            .field("jsonIt", .json, .required)
+            .create()
+            .wait()
+            
+        let models = (1...10000).map { (n: Int) -> Foo in Foo(id: n, name: "\(n)", /*notJson: (1...2500).map(Double.init).map(String.init(_:)).joined()) }*/ jsonIt: .init(uniqueKeysWithValues: (1...100).map { ("\($0)", (1...25).map(Double.init)) })) }
+        for subset in models.chunks(ofCount: 100) {
+            try subset.create(on: db).wait()
+        }
+        
+        let remodels = try Foo.query(on: db).all().wait()
+        
+        try db.schema(Foo.schema).delete().wait()
+        
+        let instrumentation = db.instrumentation!
+        
+        db.logger.info("Requeried \(remodels.count) rows")
+        db.logger.info("Individual records:")
+        db.logger.info("\(instrumentation.queryRecords.map(\.description).joined(separator: "\n"))")
+        db.logger.info("Aggregate record:")
+        db.logger.info("\(instrumentation.aggregateRecord)")
+        db.logger.info("Global record:")
+        db.logger.info("\(QueryInstrumentation.readGlobalRecordSnapshot())")
     }
 
     var benchmarker: FluentBenchmarker {

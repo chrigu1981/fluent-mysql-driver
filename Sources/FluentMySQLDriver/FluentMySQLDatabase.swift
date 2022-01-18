@@ -1,6 +1,7 @@
 import FluentSQL
 import MySQLKit
 import AsyncKit
+import Dispatch
 
 struct _FluentMySQLDatabase {
     let database: MySQLDatabase
@@ -40,6 +41,62 @@ extension _FluentMySQLDatabase: Database {
             return self.eventLoop.makeFailedFuture(error)
         }
     }
+
+    func execute(
+        instrumentedQuery query: DatabaseQuery,
+        addingToPerfRecord perfRecord: SQLQueryPerformanceRecord?,
+        onOutput: @escaping (DatabaseOutput) -> ()
+    ) -> EventLoopFuture<SQLQueryPerformanceRecord?> {
+        var perfRecord = perfRecord
+        
+        let expression = perfRecord.measure(metric: .queryASTGenerationDuration) {
+            SQLQueryConverter(delegate: MySQLConverterDelegate()).convert(query)
+        }
+        let (sql, binds) = perfRecord.measure(metric: .serializationDuration) { self.serialize(expression) }
+        perfRecord?.record(binds.count, for: .boundParameterCount)
+        if perfRecord != nil, binds.count > 10 {
+            let condensedSql = sql.replacingOccurrences(
+                of: String(repeating: "?, ", count: binds.count - 3),
+                with: "..<\(binds.count - 3)>..",
+                options: .backwards,
+                range: nil
+            )
+            perfRecord?.record(condensedSql, for: .serializedQueryText)
+        } else {
+            perfRecord?.record(sql, for: .serializedQueryText)
+        }
+        do {
+            let encodedBinds = try perfRecord.measure(metric: .parameterEncodingDuration) { try binds.map { try self.encoder.encode($0) } }
+            let processingStart = DispatchTime.now()
+            
+            return self.query(sql, encodedBinds,
+                onRow: { row in
+                    let decodeStart = DispatchTime.now()
+                    let output = row.databaseOutput(decoder: self.decoder)
+                    perfRecord?.record(additional: DispatchTime.secondsElapsed(since: decodeStart), for: .outputRowsDecodingDuration)
+                    onOutput(output)
+                },
+                onMetadata: { metadata in
+                    switch query.action {
+                    case .create:
+                        let row = LastInsertRow(
+                            metadata: metadata,
+                            customIDKey: query.customIDKey
+                        )
+                        onOutput(row)
+                    default:
+                        break
+                }
+            }).map {
+                perfRecord?.record(DispatchTime.secondsElapsed(since: processingStart), for: .processingDuration)
+                perfRecord?.deduct(valueFor: .outputRowsDecodingDuration, from: .processingDuration)
+                return perfRecord
+            }
+        } catch {
+            return self.eventLoop.makeFailedFuture(error)
+        }
+    }
+
 
     func execute(schema: DatabaseSchema) -> EventLoopFuture<Void> {
         let expression = SQLSchemaConverter(delegate: MySQLConverterDelegate())
@@ -106,7 +163,46 @@ extension _FluentMySQLDatabase: SQLDatabase {
         sql query: SQLExpression,
         _ onRow: @escaping (SQLRow) -> ()
     ) -> EventLoopFuture<Void> {
-        self.sql().execute(sql: query, onRow)
+        if self.context.instrumentation != nil {
+            return self.sql().execute(sqlWithPerformanceTracking: query, onRow).map {
+                self.context.instrumentation?.add(record: $0)
+            }
+        } else {
+            return self.sql().execute(sql: query, onRow)
+        }
+    }
+    
+    public func execute(
+        sqlWithPerformanceTracking query: SQLExpression,
+        _ onRow: @escaping (SQLRow) -> ()
+    ) -> EventLoopFuture<SQLQueryPerformanceRecord> {
+        self.sql().execute(sqlWithPerformanceTracking: query, onRow)
+    }
+
+    public func execute<D>(
+        sql query: SQLExpression,
+        decoding: D.Type,
+        _ handler: @escaping (Result<D, Error>) -> ()
+    ) -> EventLoopFuture<Void>
+        where D: Decodable
+    {
+        if self.context.instrumentation != nil {
+            return self.sql().execute(sqlWithPerformanceTracking: query, decoding: D.self, handler).map {
+                self.context.instrumentation?.add(record: $0)
+            }
+        } else {
+            return self.sql().execute(sql: query, decoding: D.self, handler)
+        }
+    }
+
+    public func execute<D>(
+        sqlWithPerformanceTracking query: SQLExpression,
+        decoding: D.Type,
+        _ handler: @escaping (Result<D, Error>) -> ()
+    ) -> EventLoopFuture<SQLQueryPerformanceRecord>
+        where D: Decodable
+    {
+        self.sql().execute(sqlWithPerformanceTracking: query, decoding: D.self, handler)
     }
 }
 
