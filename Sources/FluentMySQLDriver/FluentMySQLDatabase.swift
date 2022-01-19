@@ -56,7 +56,7 @@ extension _FluentMySQLDatabase: Database {
         perfRecord?.record(binds.count, for: .boundParameterCount)
         if perfRecord != nil, binds.count > 10 {
             let condensedSql = sql.replacingOccurrences(
-                of: String(repeating: "?, ", count: binds.count - 3),
+                of: String(repeating: " ?, ", count: binds.count - 3),
                 with: "..<\(binds.count - 3)>..",
                 options: .backwards,
                 range: nil
