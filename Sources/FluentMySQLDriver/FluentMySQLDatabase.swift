@@ -164,9 +164,9 @@ extension _FluentMySQLDatabase: SQLDatabase {
         sql query: SQLExpression,
         _ onRow: @escaping (SQLRow) -> ()
     ) -> EventLoopFuture<Void> {
-        if self.context.instrumentation != nil {
+        if let instrumentation = self.context.instrumentation {
             return self.sql().execute(sqlWithPerformanceTracking: query, onRow).map {
-                self.context.instrumentation?.add(record: $0)
+                instrumentation.add(record: $0)
             }
         } else {
             return self.sql().execute(sql: query, onRow)
