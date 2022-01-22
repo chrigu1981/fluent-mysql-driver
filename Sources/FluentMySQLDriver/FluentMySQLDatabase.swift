@@ -74,6 +74,7 @@ extension _FluentMySQLDatabase: Database {
                     let decodeStart = DispatchTime.now()
                     let output = row.databaseOutput(decoder: self.decoder)
                     perfRecord?.record(additional: DispatchTime.secondsElapsed(since: decodeStart), for: .outputRowsDecodingDuration)
+                    perfRecord?.record(additional: 1, for: .returnedResultRowCount)
                     onOutput(output)
                 },
                 onMetadata: { metadata in
